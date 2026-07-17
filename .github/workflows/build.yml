@@ -1,0 +1,66 @@
+name: Build Plugin
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: latest
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm run typecheck
+
+      - run: pnpm run build
+
+      - name: Package plugin
+        run: |
+          mkdir -p dist/decky-netbird/dist
+          cp dist/index.js dist/index.js.map dist/decky-netbird/dist/
+          cp -r icons dist/decky-netbird/
+          cp plugin.json dist/decky-netbird/
+          cp package.json dist/decky-netbird/
+          cp main.py dist/decky-netbird/
+          cp LICENSE dist/decky-netbird/
+          cp README.md dist/decky-netbird/
+          cd dist
+          zip -r decky-netbird.zip decky-netbird/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: decky-netbird
+          path: dist/decky-netbird.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: decky-netbird
+          path: .
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: decky-netbird.zip
+          generate_release_notes: true
