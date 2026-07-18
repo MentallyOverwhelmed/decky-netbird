@@ -107,7 +107,6 @@ pnpm run typecheck   # TypeScript type check
 
 ## Acknowledgements
 
-# Development Journey
 This plugin was built using an iterative, AI-assisted development workflow (powered by OpenCode & DeepSeek V4 Flash). Every feature was incrementally generated, reviewed, and thoroughly tested directly on physical Steam Deck hardware to ensure compatibility with SteamOS and NetBird's CLI behaviors.
 
 ## License
