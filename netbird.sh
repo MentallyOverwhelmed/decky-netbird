@@ -102,14 +102,46 @@ uninstall_netbird() {
     echo "NetBird has been uninstalled."
 }
 
+update_netbird() {
+    echo "Resolving latest stable NetBird release version..."
+    LATEST_VERSION=$(curl -s https://api.github.com/repos/netbirdio/netbird/releases/latest | grep '"tag_name":' | sed -E 's/.*"v([^"]+)".*/\1/')
+
+    if [ -z "$LATEST_VERSION" ]; then
+        echo "Error: Failed to resolve the latest NetBird version tag." >&2
+        exit 1
+    fi
+
+    echo "Latest version identified: v$LATEST_VERSION"
+
+    URL_NETBIRD="https://github.com/netbirdio/netbird/releases/download/v${LATEST_VERSION}/netbird_${LATEST_VERSION}_linux_amd64.tar.gz"
+    TEMP_DIR=$(mktemp -d)
+
+    echo "Downloading..."
+    if ! curl -L "$URL_NETBIRD" -o "$TEMP_DIR/netbird.tar.gz"; then
+        echo "Error: Failed to download." >&2
+        rm -rf "$TEMP_DIR"
+        exit 1
+    fi
+
+    tar -xzf "$TEMP_DIR/netbird.tar.gz" -C "$TEMP_DIR"
+    sudo mv "$TEMP_DIR/netbird" "$BIN_DIR/netbird"
+    sudo chmod +x "$BIN_DIR/netbird"
+    rm -rf "$TEMP_DIR"
+
+    sudo systemctl restart netbird 2>/dev/null || sudo systemctl start netbird 2>/dev/null || true
+    sleep 2
+    echo "NetBird updated to v$LATEST_VERSION. Service: $(systemctl is-active netbird 2>/dev/null || echo 'not started')"
+}
+
 show_menu() {
     echo ""
     echo "=== NetBird Manager ==="
     echo "1) Install NetBird"
-    echo "2) Uninstall NetBird"
-    echo "3) Exit"
+    echo "2) Update NetBird"
+    echo "3) Uninstall NetBird"
+    echo "4) Exit"
     echo ""
-    echo -n "Select an option [1-3]: "
+    echo -n "Select an option [1-4]: "
 }
 
 while true; do
@@ -117,8 +149,9 @@ while true; do
     read -r choice
     case "$choice" in
         1) install_netbird; echo ""; echo "Installation complete. Press Enter to continue..."; read -r ;;
-        2) uninstall_netbird; echo ""; echo "Press Enter to continue..."; read -r ;;
-        3) echo "Exiting."; exit 0 ;;
-        *) echo "Invalid option. Please select 1, 2, or 3." ;;
+        2) update_netbird; echo ""; echo "Update complete. Press Enter to continue..."; read -r ;;
+        3) uninstall_netbird; echo ""; echo "Press Enter to continue..."; read -r ;;
+        4) echo "Exiting."; exit 0 ;;
+        *) echo "Invalid option. Please select 1, 2, 3, or 4." ;;
     esac
 done
