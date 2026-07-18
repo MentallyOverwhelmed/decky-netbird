@@ -18,6 +18,18 @@ Manage [NetBird](https://netbird.io) VPN on your Steam Deck directly from the Qu
 - **Block Inbound** — toggle inbound connection blocking
 - **Deregister** — remove this peer from the network
 
+## Preview
+
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/cbf9877a-6aa3-484b-9edc-36fb6a8e6d00" width="230" alt="Status" />
+  <img src="https://github.com/user-attachments/assets/416908f7-c1fb-43aa-8466-fa1c38625492" width="230" alt="Peers" />
+  <img src="https://github.com/user-attachments/assets/9cba08dc-e688-440e-92ff-aba9b5d68e8f" width="230" alt="Resources" />
+</p>
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/4855a7a7-7df5-4ced-8b00-32ce931ccfd0" width="230" alt="Configuration" />
+  <img src="https://github.com/user-attachments/assets/d6fdf376-6ed6-4fa9-ad7e-047a45f4d865" width="230" alt="About" />
+</p>
+
 ## Prerequisites
 
 - [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader) installed on your Steam Deck
@@ -104,6 +116,10 @@ pnpm run typecheck   # TypeScript type check
 ```
 
 ---
+
+## Troubleshooting
+
+- If the plugin keeps loading indefinitely (caused by a wrong setup-key or a wrong management URL), please restart your Steam Deck and check everything is correct again.
 
 ## Acknowledgements
 
