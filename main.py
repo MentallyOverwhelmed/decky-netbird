@@ -3,8 +3,11 @@ import json
 import decky
 import re
 import threading
+import os
+import shutil
 
 DEFAULT_MGMT_URL = "https://api.netbird.io:443"
+NETBIRD_BINARY = "/opt/netbird/bin/netbird"
 
 
 class Plugin:
@@ -12,9 +15,14 @@ class Plugin:
         self._mgmt_url = DEFAULT_MGMT_URL
         self._running_process = None
         self._process_lock = threading.Lock()
+        self._custom_binary_path = None
 
     async def _main(self):
         decky.logger.info("NetBird VPN plugin loaded")
+        saved = decky.settings.get("customBinaryPath", "")
+        if saved:
+            self._custom_binary_path = saved
+            decky.logger.info(f"Loaded custom binary path: {saved}")
         detected = self._detect_management_url()
         if detected:
             self._mgmt_url = detected
@@ -61,8 +69,18 @@ class Plugin:
                 return match.group(1)
         return None
 
+    def _resolve_binary(self):
+        if self._custom_binary_path:
+            if os.path.isfile(self._custom_binary_path) and os.access(self._custom_binary_path, os.X_OK):
+                return self._custom_binary_path
+            decky.logger.warning(f"Custom binary path not found: {self._custom_binary_path}")
+        if os.path.isfile(NETBIRD_BINARY) and os.access(NETBIRD_BINARY, os.X_OK):
+            return NETBIRD_BINARY
+        resolved = shutil.which("netbird")
+        return resolved if resolved else "netbird"
+
     def _run_simple(self, args):
-        cmd = ["netbird"] + args
+        cmd = [self._resolve_binary()] + args
         decky.logger.info(f"Running simple: {' '.join(cmd)}")
         try:
             result = subprocess.run(
@@ -89,7 +107,7 @@ class Plugin:
             return {"success": False, "stdout": "", "stderr": "netbird not found in PATH"}
 
     def _run_auth(self, args):
-        cmd = ["netbird"] + args
+        cmd = [self._resolve_binary()] + args
         decky.logger.info(f"Running auth: {' '.join(cmd)}")
 
         auth_holder = {"url": None}
@@ -426,6 +444,19 @@ class Plugin:
             if detected:
                 self._mgmt_url = detected
         return self._mgmt_url
+
+    async def set_binary_path(self, path):
+        decky.logger.info(f"=== set_binary_path: {path} ===")
+        self._custom_binary_path = path.strip() if path else ""
+        decky.settings["customBinaryPath"] = self._custom_binary_path
+        return {"success": True}
+
+    async def get_binary_path(self):
+        resolved = self._resolve_binary()
+        return {
+            "configured": self._custom_binary_path or "",
+            "resolved": resolved,
+        }
 
     async def get_version(self):
         decky.logger.info("=== get_version ===")
