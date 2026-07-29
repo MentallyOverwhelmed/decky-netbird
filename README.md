@@ -39,24 +39,11 @@ Manage [NetBird](https://netbird.io) VPN on your Steam Deck directly from the Qu
 
 ## Install NetBird (one-time, required before using the plugin)
 
-> **SteamOS users:** If you're on stock SteamOS (not Bazzite), you need to disable the immutable filesystem first. Run this once before the script below:
->
-> ```bash
-> sudo steamos-readonly disable
-> ```
->
-> After NetBird is installed, you can re-enable the immutable filesystem with:
->
-> ```bash
-> sudo steamos-readonly enable
-> ```
-
 Open **Konsole** (terminal emulator) on your Steam Deck in Gaming Mode, or a terminal in Desktop Mode, and run:
 
 ```bash
-curl -L -o netbird.sh https://raw.githubusercontent.com/MentallyOverwhelmed/decky-netbird/main/netbird.sh
-chmod +x netbird.sh
-./netbird.sh
+curl -L -o netbird.sh https://raw.githubusercontent.com/MentallyOverwhelmed/decky-netbird/v1.0.1/netbird.sh
+bash netbird.sh
 ```
 
 Then select option **1) Install NetBird** from the menu. The script will prompt for your sudo password when needed.
@@ -119,11 +106,10 @@ pnpm run typecheck   # TypeScript type check
 
 ## Troubleshooting
 
-- If the plugin keeps loading indefinitely (caused by a wrong setup-key or a wrong management URL), please restart your Steam Deck and check everything is correct again.
-
-## Acknowledgements
-
-This plugin was built using an iterative, AI-assisted development workflow (powered by OpenCode & DeepSeek V4 Flash). Every feature was incrementally generated, reviewed, and thoroughly tested directly on physical Steam Deck hardware to ensure compatibility with SteamOS and NetBird's CLI behaviors.
+- If the plugin keeps loading indefinitely, restart your Steam Deck and verify your management URL and setup key.
+- If `netbird` is not found in the terminal after installing, run `source /etc/profile.d/netbird.sh` or open a new terminal.
+- If the service fails to start, check `systemctl status netbird` for details.
+- If installing on SteamOS, use the release URL above (not `main` branch) to avoid cached versions.
 
 ## License
 
