@@ -4,6 +4,7 @@ DEFAULT_BIN="/opt/netbird/bin/netbird"
 PROFILE_SCRIPT="/etc/profile.d/netbird.sh"
 ATOMIC_CONF="/etc/atomic-update.conf.d/netbird.conf"
 CONFIG_DIRS=("/etc/netbird" "/opt/netbird" "/var/lib/netbird" "/var/log/netbird")
+NETBIRD_BIN=""
 
 _choose_bin_path() {
     echo ""
@@ -16,32 +17,32 @@ _choose_bin_path() {
     if [ "$path_choice" = "2" ]; then
         echo -n "Enter full path to netbird binary (e.g., /opt/netbird/bin/netbird): "
         read -r custom_path
-        echo "$custom_path"
+        NETBIRD_BIN="$custom_path"
     else
-        echo "$DEFAULT_BIN"
+        NETBIRD_BIN="$DEFAULT_BIN"
     fi
 }
 
 _download_netbird() {
     local temp_dir="$1"
-    echo "Resolving latest stable NetBird release version..."
+    echo "Resolving latest stable NetBird release version..." >&2
     LATEST_VERSION=$(curl -s https://api.github.com/repos/netbirdio/netbird/releases/latest | grep '"tag_name":' | sed -E 's/.*"v([^"]+)".*/\1/')
     if [ -z "$LATEST_VERSION" ]; then
         echo "Error: Failed to resolve the latest NetBird version tag." >&2
         return 1
     fi
-    echo "Latest version identified: v$LATEST_VERSION"
+    echo "Latest version identified: v$LATEST_VERSION" >&2
     local url="https://github.com/netbirdio/netbird/releases/download/v${LATEST_VERSION}/netbird_${LATEST_VERSION}_linux_amd64.tar.gz"
-    echo "Downloading archive payload..."
+    echo "Downloading archive payload..." >&2
     if ! curl -L "$url" -o "$temp_dir/netbird.tar.gz"; then
         echo "Error: Failed to download." >&2
         return 1
     fi
-    echo "Extracting binary..."
+    echo "Extracting binary..." >&2
     tar -xzf "$temp_dir/netbird.tar.gz" -C "$temp_dir"
     if [ ! -f "$temp_dir/netbird" ]; then
         echo "Error: netbird binary not found in archive." >&2
-        ls -la "$temp_dir/"
+        ls -la "$temp_dir/" >&2
         return 1
     fi
     echo "$LATEST_VERSION"
@@ -85,7 +86,7 @@ _setup_path_integration() {
 _install_service() {
     local bin_path="$1"
     echo "Installing systemd service via netbird service install..."
-    sudo "$bin_path" service install || {
+    if ! sudo "$bin_path" service install; then
         echo "Warning: netbird service install failed, trying direct service setup..." >&2
         local service_path="/etc/systemd/system/netbird.service"
         sudo bash -c "cat << EOFSVC > $service_path
@@ -104,7 +105,8 @@ Environment=HOME=/root
 
 [Install]
 WantedBy=multi-user.target
-EOFSVC"
+EOFSVC
+"
         sudo systemctl daemon-reload
         sudo systemctl enable netbird
     fi
@@ -112,7 +114,7 @@ EOFSVC"
 }
 
 install_netbird() {
-    NETBIRD_BIN=$(_choose_bin_path)
+    _choose_bin_path
     local bin_dir
     bin_dir=$(dirname "$NETBIRD_BIN")
     echo "Target binary path: $NETBIRD_BIN"
@@ -132,7 +134,8 @@ install_netbird() {
     echo "Deployment finalized successfully."
     echo "Binary path: $NETBIRD_BIN"
     echo "Service state: $(systemctl is-active netbird 2>/dev/null || echo 'unknown')"
-    echo "To use netbird in your current shell, run: source $PROFILE_SCRIPT"
+    echo "To use netbird in this terminal, run:"
+    echo "  source $PROFILE_SCRIPT"
 }
 
 uninstall_netbird() {
@@ -230,6 +233,8 @@ update_netbird() {
     echo "NetBird updated to v$version."
     echo "Binary: $bin_path"
     echo "Service: $(systemctl is-active netbird 2>/dev/null || echo 'unknown')"
+    echo "To use netbird in this terminal, run:"
+    echo "  source $PROFILE_SCRIPT"
 }
 
 show_menu() {
