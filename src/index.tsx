@@ -57,6 +57,11 @@ interface ActionResult {
   auth_url?: string;
 }
 
+interface BinaryPathInfo {
+  configured: string;
+  resolved: string;
+}
+
 const getSystemInfo = callable<[], SystemInfo>("get_system_info");
 const getStatus = callable<[], StatusInfo>("get_status");
 const getPeers = callable<[], PeerDetail[]>("get_peers");
@@ -74,6 +79,8 @@ const connect = callable<[mgmt_url: string, setup_key?: string, block_inbound?: 
 const disconnect = callable<[], ActionResult>("disconnect");
 const deregister = callable<[], ActionResult>("deregister");
 const saveManagementUrl = callable<[url: string], ActionResult>("set_management_url");
+const setBinaryPath = callable<[path: string], ActionResult>("set_binary_path");
+const getBinaryPath = callable<[], BinaryPathInfo>("get_binary_path");
 
 const pillStyle = (color: string) => ({
   display: "inline-block", padding: "2px 8px", borderRadius: "10px",
@@ -288,6 +295,8 @@ function Content() {
     if (typeof window !== "undefined") return localStorage.getItem("netbird_setup_key") || "";
     return "";
   });
+  const [binaryPath, setBinaryPathState] = useState("");
+  const [binaryPathResolved, setBinaryPathResolved] = useState("");
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const fetchSystemInfo = useCallback(async () => {
@@ -315,10 +324,18 @@ function Content() {
     catch (err) { console.error("Failed to get management URL:", err); }
   }, []);
 
+  const fetchBinaryPath = useCallback(async () => {
+    try {
+      const info = await getBinaryPath();
+      setBinaryPathState(info.configured);
+      setBinaryPathResolved(info.resolved);
+    } catch (err) { console.error("Failed to get binary path:", err); }
+  }, []);
+
   useEffect(() => { fetchSystemInfo(); }, [fetchSystemInfo]);
   useEffect(() => {
-    if (systemInfo?.netbird_installed) { fetchStatus(); fetchManagementUrl(); }
-  }, [systemInfo, fetchStatus, fetchManagementUrl]);
+    if (systemInfo?.netbird_installed) { fetchStatus(); fetchManagementUrl(); fetchBinaryPath(); }
+  }, [systemInfo, fetchStatus, fetchManagementUrl, fetchBinaryPath]);
   useEffect(() => {
     if (pollRef.current) clearInterval(pollRef.current);
     if (systemInfo?.netbird_installed) pollRef.current = setInterval(fetchStatus, 5000);
@@ -383,6 +400,15 @@ function Content() {
   const handleSaveSetupKey = useCallback((key: string) => {
     setSetupKey(key); localStorage.setItem("netbird_setup_key", key);
   }, []);
+
+  const handleSaveBinaryPath = useCallback(async (path: string) => {
+    setActionLoading(true);
+    try {
+      await setBinaryPath(path);
+      await fetchBinaryPath();
+    } catch (err) { console.error("Save binary path failed:", err); }
+    finally { setActionLoading(false); }
+  }, [fetchBinaryPath]);
 
   const handleDeregister = useCallback(async () => {
     setActionLoading(true);
@@ -567,6 +593,12 @@ function Content() {
         </PanelSectionRow>
         <PanelSectionRow>
           <ToggleField label="Block Inbound" description="Block all inbound connections for extra security" checked={blockInbound} onChange={(val) => { setBlockInbound(val); localStorage.setItem("netbird_block_inbound", String(val)); }} />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <TextField label="NetBird Binary Path" description={binaryPathResolved ? `Resolved: ${binaryPathResolved}` : "Leave empty for auto-detect"} value={binaryPath} disabled={actionLoading} onChange={(e) => setBinaryPathState(e.target.value)} />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem layout="below" disabled={actionLoading} onClick={() => handleSaveBinaryPath(binaryPath)}>Save Binary Path</ButtonItem>
         </PanelSectionRow>
       </PanelSection>
 
