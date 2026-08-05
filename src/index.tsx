@@ -9,9 +9,13 @@ import {
   ConfirmModal,
   showModal,
   DropdownItem,
+  ModalRoot,
+  DialogButton,
+  DialogButtonPrimary,
+  Focusable,
 } from "@decky/ui";
-import { callable, definePlugin } from "@decky/api";
-import { FC, useState, useEffect, useCallback, useRef } from "react";
+import { callable, definePlugin, useQuickAccessVisible } from "@decky/api";
+import { FC, useState, useEffect, useCallback, useRef, ReactNode, CSSProperties } from "react";
 
 interface SystemInfo {
   netbird_installed: boolean;
@@ -48,6 +52,7 @@ interface StatusInfo {
   peers?: { total: number; connected: number };
   status: { raw?: string; error?: string };
   version: string;
+  session_expires_at?: string;
 }
 
 interface ActionResult {
@@ -57,9 +62,20 @@ interface ActionResult {
   auth_url?: string;
 }
 
-interface BinaryPathInfo {
-  configured: string;
-  resolved: string;
+interface RenewalInfo extends ActionResult {
+  user_code?: string;
+  device_code?: string;
+}
+
+interface DaemonConfig {
+  [key: string]: unknown;
+  mDMManagedFields?: string[];
+}
+
+interface SettingsInfo {
+  config: DaemonConfig;
+  features: { disable_profiles?: boolean; disable_update_settings?: boolean; disable_networks?: boolean };
+  error?: string;
 }
 
 const getSystemInfo = callable<[], SystemInfo>("get_system_info");
@@ -79,8 +95,11 @@ const connect = callable<[mgmt_url: string, setup_key?: string, block_inbound?: 
 const disconnect = callable<[], ActionResult>("disconnect");
 const deregister = callable<[], ActionResult>("deregister");
 const saveManagementUrl = callable<[url: string], ActionResult>("set_management_url");
-const setBinaryPath = callable<[path: string], ActionResult>("set_binary_path");
-const getBinaryPath = callable<[], BinaryPathInfo>("get_binary_path");
+const getSettings = callable<[], SettingsInfo>("get_settings");
+const applySettings = callable<[updates: Record<string, unknown>], ActionResult>("set_settings");
+const renameProfile = callable<[newName: string], ActionResult>("rename_profile");
+const requestSessionRenewal = callable<[], RenewalInfo>("request_session_renewal");
+const waitSessionRenewal = callable<[userCode: string, deviceCode: string], ActionResult>("wait_session_renewal");
 
 const pillStyle = (color: string) => ({
   display: "inline-block", padding: "2px 8px", borderRadius: "10px",
@@ -89,6 +108,17 @@ const pillStyle = (color: string) => ({
 
 function Pill({ label, color }: { label: string; color: string }) {
   return <span style={pillStyle(color)}>{label}</span>;
+}
+
+function CardFocusable({ children, style }: { children: ReactNode; style?: CSSProperties }) {
+  // Steam's Focusable only becomes a gamepad focus stop when `focusable` is
+  // explicitly set (it defaults to not focusable when the card has no
+  // interactive children); the prop is missing from the published d.ts.
+  return (
+    <Focusable {...({ focusable: true } as { focusable: boolean })} style={style}>
+      {children}
+    </Focusable>
+  );
 }
 
 function LoadingSpinner() {
@@ -101,11 +131,9 @@ function LoadingSpinner() {
 
 const INSTALL_INSTRUCTIONS = `# Install NetBird on SteamOS
 Run this in Konsole (Terminal):
-# 1. Make script executable
-chmod +x netbird.sh
-# 2. Run installer (select "Install NetBird" from the menu)
-sudo ./netbird.sh
-# 3. After installation completes, restart Decky Loader:
+# 1. Run installer (select "Install NetBird" from the menu)
+bash netbird.sh
+# 2. After installation completes, restart Decky Loader:
 #    - Open Decky Loader settings
 #    - Click "Restart Decky Loader"`;
 
@@ -137,17 +165,108 @@ function AuthModal({ url, onClose }: { url: string; onClose: () => void }) {
   }, [onClose]);
 
   return (
+    <ModalRoot closeModal={onClose} onEscKeypress={onClose}>
+      <div style={{ textAlign: "center" }}>
+        <p style={{ margin: "0 0 12px 0", fontSize: "18px", fontWeight: "bold" }}>Authenticate with NetBird</p>
+        <p style={{ margin: "0 0 12px 0", color: "#ccc" }}>Scan the QR code to authenticate. This window closes automatically once connected.</p>
+        <img src={`https://api.qrserver.com/v1/create-qr-code/?size=192x192&data=${encodeURIComponent(url)}`} alt="QR Code" style={{ width: "192px", height: "192px", margin: "0 auto 12px auto", display: "block" }} />
+        {showUrl && (
+          <div style={{ backgroundColor: "rgba(0,0,0,0.6)", padding: "12px", borderRadius: "4px", wordBreak: "break-all", fontSize: "12px", color: "#4FC3F7", fontFamily: "monospace", textAlign: "left" }}>{url}</div>
+        )}
+      </div>
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px", marginTop: "16px" }}>
+        <DialogButton onClick={() => setShowUrl((v) => !v)}>{showUrl ? "Hide URL" : "Show URL"}</DialogButton>
+        <DialogButtonPrimary onClick={onClose}>Close</DialogButtonPrimary>
+      </div>
+    </ModalRoot>
+  );
+}
+
+function formatDuration(ms: number): string {
+  const mins = Math.max(0, Math.floor(ms / 60000));
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return h > 0 ? `${h}h ${m}m` : `${m}m`;
+}
+
+function RenewSessionModal({ url, userCode, deviceCode, onClose, onRenewed }: {
+  url: string; userCode: string; deviceCode: string; onClose: () => void; onRenewed: () => void;
+}) {
+  const [result, setResult] = useState<string | null>(null);
+  const [showUrl, setShowUrl] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await waitSessionRenewal(userCode, deviceCode);
+        if (!cancelled) setResult(r.success ? "Session renewed!" : (r.stderr || "Error renewing session"));
+      } catch {
+        if (!cancelled) setResult("Error renewing session");
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [userCode, deviceCode]);
+
+  const handleClose = () => {
+    onClose();
+    onRenewed();
+  };
+
+  return (
+    <ModalRoot closeModal={handleClose} onEscKeypress={handleClose}>
+      <div style={{ textAlign: "center" }}>
+        <p style={{ margin: "0 0 12px 0", fontSize: "18px", fontWeight: "bold" }}>Extend Session</p>
+        {result ? (
+          <p style={{ color: result.startsWith("Error") || result.startsWith("HTTP") ? "#f44336" : "#4CAF50", fontWeight: "bold" }}>{result}</p>
+        ) : (
+          <>
+            <p style={{ margin: "0 0 8px 0", color: "#ccc" }}>Scan the QR code to extend your session.</p>
+            <img src={`https://api.qrserver.com/v1/create-qr-code/?size=192x192&data=${encodeURIComponent(url)}`} alt="QR Code" style={{ width: "192px", height: "192px", margin: "0 auto 8px auto", display: "block" }} />
+            {showUrl && (
+              <div style={{ backgroundColor: "rgba(0,0,0,0.6)", padding: "12px", borderRadius: "4px", wordBreak: "break-all", fontSize: "12px", color: "#4FC3F7", fontFamily: "monospace", textAlign: "left" }}>{url}</div>
+            )}
+          </>
+        )}
+      </div>
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px", marginTop: "16px" }}>
+        {!result && (
+          <DialogButton onClick={() => setShowUrl((v) => !v)}>{showUrl ? "Hide URL" : "Show URL"}</DialogButton>
+        )}
+        <DialogButtonPrimary onClick={handleClose}>Close</DialogButtonPrimary>
+      </div>
+    </ModalRoot>
+  );
+}
+
+function RenameProfileModal({ current, onClose }: { current: string; onClose: () => void }) {
+  const [name, setName] = useState(current || "");
+  const [working, setWorking] = useState(false);
+  const [result, setResult] = useState<string | null>(null);
+  return (
     <ConfirmModal
-      strTitle="Authenticate with NetBird"
+      closeModal={working ? undefined : onClose}
+      strTitle="Rename Profile"
       strDescription={
-        <div style={{ textAlign: "center" }}>
-          <p style={{ margin: "0 0 16px 0", color: "#ccc" }}>Open this URL in your browser to authenticate:</p>
-          <img src={`https://api.qrserver.com/v1/create-qr-code/?size=256x256&data=${encodeURIComponent(url)}`} alt="QR Code" style={{ width: "256px", height: "256px", margin: "0 auto 8px auto", display: "block" }} />
-          {showUrl && <div style={{ backgroundColor: "rgba(0,0,0,0.6)", padding: "12px", borderRadius: "4px", wordBreak: "break-all", fontSize: "12px", color: "#4FC3F7", fontFamily: "monospace", textAlign: "left" }}>{url}</div>}
+        <div>
+          {result ? (
+            <p style={{ color: result.startsWith("Error") || result.startsWith("HTTP") ? "#f44336" : "#4CAF50", fontWeight: "bold" }}>{result}</p>
+          ) : (
+            <TextField label="New Profile Name" value={name} disabled={working} onChange={(e) => setName(e.target.value)} />
+          )}
         </div>
       }
-      strOKButtonText={showUrl ? "Hide URL" : "Show URL"}
-      onOK={() => setShowUrl(!showUrl)}
+      strOKButtonText={result ? "Close" : "Rename"}
+      onOK={async () => {
+        if (result) { onClose(); return; }
+        if (!name.trim()) return;
+        setWorking(true);
+        try {
+          const r = await renameProfile(name.trim());
+          setResult(r.success ? `Profile renamed to "${name.trim()}"` : (r.stderr || "Error renaming profile"));
+        } catch { setResult("Error renaming profile"); }
+        setWorking(false);
+      }}
     />
   );
 }
@@ -277,6 +396,26 @@ function RemoveProfileModal({ profiles, current, onClose }: { profiles: string[]
   );
 }
 
+interface SettingDef {
+  key: string;
+  sendKey: string;
+  label: string;
+  desc: string;
+  mdm?: string;
+}
+
+const TOGGLE_SETTINGS: SettingDef[] = [
+  { key: "disableAutoConnect", sendKey: "disableAutoConnect", mdm: "disableAutoConnect", label: "Disable Auto-Connect", desc: "Do not auto-connect when the daemon starts" },
+  { key: "blockInbound", sendKey: "blockInbound", mdm: "blockInbound", label: "Block Inbound", desc: "Block all inbound connections for extra security" },
+  { key: "blockLanAccess", sendKey: "blockLanAccess", label: "Block LAN Access", desc: "Block access to LAN devices" },
+  { key: "disableIpv6", sendKey: "disableIpv6", label: "Disable IPv6", desc: "Disable IPv6 on the WireGuard interface" },
+  { key: "disableDns", sendKey: "disableDns", label: "Disable DNS", desc: "Do not manage DNS resolution" },
+  { key: "disableClientRoutes", sendKey: "disableClientRoutes", mdm: "disableClientRoutes", label: "Disable Client Routes", desc: "Ignore routes pushed by the management server" },
+  { key: "disableServerRoutes", sendKey: "disableServerRoutes", mdm: "disableServerRoutes", label: "Disable Server Routes", desc: "Do not advertise routes to other peers" },
+  { key: "rosenpassEnabled", sendKey: "rosenpassEnabled", mdm: "rosenpassEnabled", label: "Rosenpass", desc: "Enable post-quantum handshake encryption" },
+  { key: "rosenpassPermissive", sendKey: "rosenpassPermissive", mdm: "rosenpassPermissive", label: "Rosenpass Permissive", desc: "Allow peers without rosenpass support" },
+];
+
 function Content() {
   const [systemInfo, setSystemInfo] = useState<SystemInfo | null>(null);
   const [statusInfo, setStatusInfo] = useState<StatusInfo | null>(null);
@@ -287,17 +426,16 @@ function Content() {
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState(false);
   const [managementUrl, setManagementUrl] = useState("");
-  const [blockInbound, setBlockInbound] = useState(() => {
-    if (typeof window !== "undefined") return localStorage.getItem("netbird_block_inbound") === "true";
-    return false;
-  });
   const [setupKey, setSetupKey] = useState(() => {
     if (typeof window !== "undefined") return localStorage.getItem("netbird_setup_key") || "";
     return "";
   });
-  const [binaryPath, setBinaryPathState] = useState("");
-  const [binaryPathResolved, setBinaryPathResolved] = useState("");
+  const [settings, setSettings] = useState<SettingsInfo | null>(null);
+  const [cfg, setCfg] = useState<DaemonConfig | null>(null);
+  const [notice, setNotice] = useState("");
+  const [refreshing, setRefreshing] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const quickAccessVisible = useQuickAccessVisible();
 
   const fetchSystemInfo = useCallback(async () => {
     setLoading(true);
@@ -320,27 +458,25 @@ function Content() {
   }, []);
 
   const fetchManagementUrl = useCallback(async () => {
-    try { const r = await getManagementUrl(); if (r) setManagementUrl(r); }
-    catch (err) { console.error("Failed to get management URL:", err); }
-  }, []);
-
-  const fetchBinaryPath = useCallback(async () => {
     try {
-      const info = await getBinaryPath();
-      setBinaryPathState(info.configured);
-      setBinaryPathResolved(info.resolved);
-    } catch (err) { console.error("Failed to get binary path:", err); }
+      const [url, s] = await Promise.all([getManagementUrl(), getSettings()]);
+      if (url) setManagementUrl(url);
+      if (s) { setSettings(s); setCfg(s.config || {}); }
+    } catch (err) { console.error("Failed to get management URL:", err); }
   }, []);
 
   useEffect(() => { fetchSystemInfo(); }, [fetchSystemInfo]);
   useEffect(() => {
-    if (systemInfo?.netbird_installed) { fetchStatus(); fetchManagementUrl(); fetchBinaryPath(); }
-  }, [systemInfo, fetchStatus, fetchManagementUrl, fetchBinaryPath]);
+    if (systemInfo?.netbird_installed) { fetchStatus(); fetchManagementUrl(); }
+  }, [systemInfo, fetchStatus, fetchManagementUrl]);
   useEffect(() => {
     if (pollRef.current) clearInterval(pollRef.current);
-    if (systemInfo?.netbird_installed) pollRef.current = setInterval(fetchStatus, 5000);
+    if (systemInfo?.netbird_installed && quickAccessVisible) pollRef.current = setInterval(fetchStatus, 5000);
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
-  }, [systemInfo?.netbird_installed, fetchStatus]);
+  }, [systemInfo?.netbird_installed, fetchStatus, quickAccessVisible]);
+  useEffect(() => {
+    if (quickAccessVisible && systemInfo?.netbird_installed) fetchStatus();
+  }, [quickAccessVisible, systemInfo?.netbird_installed, fetchStatus]);
 
   const showAuthModal = (url: string) => {
     let closeModal = () => {};
@@ -353,14 +489,14 @@ function Content() {
     setActionLoading(true);
     try {
       if (value) {
-        const result = await connect(managementUrl, setupKey || undefined, blockInbound);
+        const result = await connect(managementUrl, setupKey || undefined);
         if (result.auth_url) showAuthModal(result.auth_url);
       } else { await disconnect(); }
       await new Promise(r => setTimeout(r, 1500));
       await fetchStatus();
     } catch (err) { console.error("Toggle failed:", err); }
     finally { setActionLoading(false); }
-  }, [managementUrl, setupKey, blockInbound, fetchStatus]);
+  }, [managementUrl, setupKey, fetchStatus]);
 
   const handleNetworkToggle = useCallback(async (name: string, value: boolean) => {
     setActionLoading(true);
@@ -390,25 +526,53 @@ function Content() {
   const handleSaveUrl = useCallback(async (url: string) => {
     setActionLoading(true);
     try {
-      await saveManagementUrl(url);
+      const r = await saveManagementUrl(url);
       setManagementUrl(url);
       localStorage.setItem("netbird_mgmt_url", url);
-    } catch (err) { console.error("Save URL failed:", err); }
+      setNotice(r.success ? (r.stdout || "Management URL saved") : (r.stderr || "Failed to save management URL"));
+    } catch (err) { console.error("Save URL failed:", err); setNotice("Failed to save management URL"); }
     finally { setActionLoading(false); }
   }, []);
+
+  const handleSettingToggle = useCallback(async (s: SettingDef, value: boolean) => {
+    setCfg((prev) => ({ ...(prev || {}), [s.key]: value }));
+    try {
+      const r = await applySettings({ [s.sendKey]: value });
+      setNotice(r.success ? (r.stdout || "Settings applied") : (r.stderr || "Failed to apply setting"));
+    } catch (err) { console.error("Apply setting failed:", err); setNotice("Failed to apply setting"); }
+    const fresh = await getSettings().catch(() => null);
+    if (fresh) setCfg(fresh.config || {});
+  }, []);
+
+  const handleRenewSession = useCallback(async () => {
+    setActionLoading(true);
+    try {
+      const r = await requestSessionRenewal();
+      if (!r.success || !r.auth_url) {
+        setNotice(r.stderr || "Cannot start session renewal");
+        return;
+      }
+      let closeModal = () => {};
+      const C: FC = () => (
+        <RenewSessionModal url={r.auth_url || ""} userCode={r.user_code || ""} deviceCode={r.device_code || ""} onClose={closeModal} onRenewed={fetchStatus} />
+      );
+      const modal = showModal(<C />, window, { strTitle: "Extend Session", popupWidth: 420, popupHeight: 520 });
+      closeModal = modal.Close;
+    } catch (err) { console.error("Renew failed:", err); setNotice("Failed to start session renewal"); }
+    finally { setActionLoading(false); }
+  }, [fetchStatus]);
 
   const handleSaveSetupKey = useCallback((key: string) => {
     setSetupKey(key); localStorage.setItem("netbird_setup_key", key);
   }, []);
 
-  const handleSaveBinaryPath = useCallback(async (path: string) => {
-    setActionLoading(true);
+  const handleRefresh = useCallback(async () => {
+    setRefreshing(true);
     try {
-      await setBinaryPath(path);
-      await fetchBinaryPath();
-    } catch (err) { console.error("Save binary path failed:", err); }
-    finally { setActionLoading(false); }
-  }, [fetchBinaryPath]);
+      await Promise.all([fetchStatus(), fetchManagementUrl()]);
+    } catch (err) { console.error("Refresh failed:", err); }
+    finally { setRefreshing(false); }
+  }, [fetchStatus, fetchManagementUrl]);
 
   const handleDeregister = useCallback(async () => {
     setActionLoading(true);
@@ -441,6 +605,13 @@ function Content() {
     closeModal = modal.Close;
   }, [profiles]);
 
+  const showRenameProfileModal = useCallback(() => {
+    let closeModal = () => {};
+    const C: FC = () => <RenameProfileModal current={profiles.current} onClose={closeModal} />;
+    const modal = showModal(<C />, window, { strTitle: "Rename Profile", popupWidth: 400, popupHeight: 300 });
+    closeModal = modal.Close;
+  }, [profiles.current]);
+
   if (loading) {
     return <PanelSection title="NetBird VPN"><PanelSectionRow><LoadingSpinner /></PanelSectionRow></PanelSection>;
   }
@@ -456,31 +627,89 @@ function Content() {
 
   const needsLogin = statusInfo?.daemon_status === "NeedsLogin";
   const isConnected = statusInfo?.connected || false;
+  const authFailed = statusInfo?.daemon_status === "LoginFailed";
+  const connecting = statusInfo?.daemon_status === "Connecting";
+  const displayLabel = isConnected ? "Connected" : needsLogin ? "Needs Login" : authFailed ? "Auth Failed" : connecting ? "Connecting" : "Disconnected";
+  const displayColor = isConnected ? "#4CAF50" : needsLogin ? "#ff9800" : authFailed ? "#f44336" : connecting ? "#4FC3F7" : "#f44336";
   const profileOptions = profiles.profiles.map((p, i) => ({ data: i, label: p }));
+  const sessionMs = statusInfo?.session_expires_at ? new Date(statusInfo.session_expires_at).getTime() - Date.now() : 0;
+  const sessionValid = isConnected && sessionMs > 0;
+  const sessionWarning = sessionValid && sessionMs < 5 * 60 * 1000;
+
+  if (!isConnected && (needsLogin || authFailed)) {
+    return (
+      <>
+        <PanelSection title="NetBird VPN">
+          <PanelSectionRow>
+            <div style={{ padding: "16px", backgroundColor: "rgba(0,0,0,0.4)", borderRadius: "8px" }}>
+              <p style={{ margin: 0, fontSize: "18px", fontWeight: "bold", color: displayColor }}>{displayLabel}</p>
+              <p style={{ margin: "4px 0 0 0", fontSize: "12px", color: "#aaa" }}>
+                {authFailed ? "Authentication failed. Check your credentials and try again." : "Log in to connect to your NetBird network."}
+              </p>
+            </div>
+          </PanelSectionRow>
+        </PanelSection>
+        <PanelSection title="Login">
+          <PanelSectionRow>
+            <TextField label="Management URL" description="NetBird management server address" value={managementUrl} disabled={actionLoading} onChange={(e) => setManagementUrl(e.target.value)} />
+          </PanelSectionRow>
+          <PanelSectionRow>
+            <TextField label="Setup Key" description="Optional: pre-authentication key" value={setupKey} disabled={actionLoading} onChange={(e) => handleSaveSetupKey(e.target.value)} />
+          </PanelSectionRow>
+          <PanelSectionRow>
+            <ButtonItem layout="below" disabled={actionLoading} onClick={() => handleToggleConnection(true)}>Authenticate & Connect</ButtonItem>
+          </PanelSectionRow>
+          {notice && (
+            <PanelSectionRow>
+              <p style={{ margin: 0, fontSize: "11px", color: notice.startsWith("Failed") || notice.startsWith("HTTP") ? "#f44336" : "#4CAF50" }}>{notice}</p>
+            </PanelSectionRow>
+          )}
+        </PanelSection>
+      </>
+    );
+  }
 
   return (
     <>
       {/* ── Status Card ── */}
       <PanelSection title="NetBird VPN">
         <PanelSectionRow>
-          <div style={{ padding: "16px", backgroundColor: "rgba(0,0,0,0.4)", borderRadius: "8px" }}>
+          <CardFocusable style={{ width: "100%" }}>
+            <div style={{ padding: "16px", backgroundColor: "rgba(0,0,0,0.4)", borderRadius: "8px" }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
               <div>
-                <p style={{ margin: 0, fontSize: "18px", fontWeight: "bold", color: isConnected ? "#4CAF50" : needsLogin ? "#ff9800" : "#f44336" }}>
-                  {isConnected ? "Connected" : needsLogin ? "Needs Login" : "Disconnected"}
+                <p style={{ margin: 0, fontSize: "18px", fontWeight: "bold", color: displayColor }}>
+                  {displayLabel}
                 </p>
                 {profiles.current && <p style={{ margin: "2px 0 0 0", fontSize: "11px", color: "#888" }}>Profile: {profiles.current}</p>}
                 {statusInfo?.netbird_ip && <p style={{ margin: "2px 0 0 0", fontSize: "12px", color: "#aaa" }}>{statusInfo.netbird_ip}</p>}
               </div>
-              <Pill color={isConnected ? "#4CAF50" : needsLogin ? "#ff9800" : "#666"} label={isConnected ? "Active" : needsLogin ? "Pending" : "Offline"} />
+              <Pill color={isConnected ? "#4CAF50" : needsLogin ? "#ff9800" : authFailed ? "#f44336" : connecting ? "#4FC3F7" : "#666"} label={isConnected ? "Active" : needsLogin ? "Pending" : authFailed ? "Failed" : connecting ? "Connecting" : "Offline"} />
             </div>
             {statusInfo?.peers && (
               <div style={{ marginTop: "8px", display: "flex", gap: "12px", fontSize: "12px", color: "#888" }}>
                 <span>Peers: <strong style={{ color: "#ccc" }}>{statusInfo.peers.connected}/{statusInfo.peers.total}</strong></span>
               </div>
             )}
+            {sessionValid && (
+              <div style={{ marginTop: "8px", fontSize: "12px", color: sessionWarning ? "#ff9800" : "#888" }}>
+                {sessionWarning && <span style={{ fontWeight: "bold", marginRight: "6px" }}>Session expires soon!</span>}
+                <span>Session expires in <strong style={{ color: sessionWarning ? "#ff9800" : "#ccc" }}>{formatDuration(sessionMs)}</strong></span>
+              </div>
+            )}
+            {notice && (
+              <div style={{ marginTop: "8px", fontSize: "11px", color: notice.startsWith("Failed") || notice.startsWith("HTTP") ? "#f44336" : "#4CAF50" }}>{notice}</div>
+            )}
           </div>
+          </CardFocusable>
         </PanelSectionRow>
+        {sessionValid && (
+          <PanelSectionRow>
+            <ButtonItem layout="below" disabled={actionLoading} onClick={handleRenewSession}>
+              {sessionWarning ? "Extend Session Now" : "Extend Session"}
+            </ButtonItem>
+          </PanelSectionRow>
+        )}
       </PanelSection>
 
       {/* ── Connection Toggle ── */}
@@ -488,7 +717,7 @@ function Content() {
         <PanelSectionRow>
           <ToggleField
             label="VPN Toggle"
-            description={isConnected ? "NetBird is active" : needsLogin ? "Authentication required" : "NetBird is off"}
+            description={isConnected ? "NetBird is active" : needsLogin ? "Authentication required" : authFailed ? "Authentication failed - retry" : "NetBird is off"}
             checked={isConnected}
             disabled={actionLoading}
             onChange={handleToggleConnection}
@@ -512,6 +741,9 @@ function Content() {
           <ButtonItem layout="below" disabled={actionLoading} onClick={showAddProfileModal}>Add Profile</ButtonItem>
         </PanelSectionRow>
         <PanelSectionRow>
+          <ButtonItem layout="below" disabled={actionLoading || !profiles.current} onClick={showRenameProfileModal}>Rename Profile</ButtonItem>
+        </PanelSectionRow>
+        <PanelSectionRow>
           <ButtonItem layout="below" disabled={actionLoading || profiles.profiles.length <= 1} onClick={showRemoveProfileModal}>Remove Profile</ButtonItem>
         </PanelSectionRow>
       </PanelSection>
@@ -521,24 +753,28 @@ function Content() {
         {peers.length === 0 ? (
           <PanelSectionRow><p style={{ margin: 0, fontSize: "12px", color: "#888", fontStyle: "italic" }}>No peers connected</p></PanelSectionRow>
         ) : (
-          peers.map((peer, i) => (
-            <PanelSectionRow key={i}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 12px", backgroundColor: "rgba(0,0,0,0.3)", borderRadius: "6px" }}>
-                <div>
-                  <p style={{ margin: 0, fontSize: "13px", color: "#ddd" }}>{peer.fqdn || peer.ip}</p>
-                  <div style={{ display: "flex", gap: "6px", marginTop: "2px" }}>
-                    {peer.latency && <span style={{ fontSize: "11px", color: "#888" }}>{peer.latency}</span>}
-                    {peer.connection_type && (
-                      <span style={{ fontSize: "11px", color: peer.connection_type === "P2P" ? "#4FC3F7" : "#ff9800" }}>
-                        {peer.connection_type}
-                      </span>
-                    )}
+          <PanelSectionRow>
+            <CardFocusable style={{ width: "100%" }}>
+              <div style={{ backgroundColor: "rgba(0,0,0,0.3)", borderRadius: "6px", overflow: "hidden" }}>
+                {peers.map((peer, i) => (
+                  <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 12px", borderBottom: i < peers.length - 1 ? "1px solid rgba(255,255,255,0.08)" : "none" }}>
+                    <div>
+                      <p style={{ margin: 0, fontSize: "13px", color: "#ddd" }}>{peer.fqdn || peer.ip}</p>
+                      <div style={{ display: "flex", gap: "6px", marginTop: "2px" }}>
+                        {peer.latency && <span style={{ fontSize: "11px", color: "#888" }}>{peer.latency}</span>}
+                        {peer.connection_type && (
+                          <span style={{ fontSize: "11px", color: peer.connection_type === "P2P" ? "#4FC3F7" : "#ff9800" }}>
+                            {peer.connection_type}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    <Pill color={peer.status === "connected" ? "#4CAF50" : peer.status === "idle" ? "#ff9800" : peer.status === "connecting" ? "#4FC3F7" : "#f44336"} label={peer.status} />
                   </div>
-                </div>
-                <Pill color={peer.status === "connected" ? "#4CAF50" : peer.status === "idle" ? "#ff9800" : "#666"} label={peer.status} />
-              </div>
-            </PanelSectionRow>
-          ))
+                ))}
+            </div>
+          </CardFocusable>
+        </PanelSectionRow>
         )}
       </PanelSection>
 
@@ -565,11 +801,13 @@ function Content() {
       {/* ── Port Forwarding ── */}
       {forwardingRules.length > 0 && (
         <PanelSection title="Port Forwarding">
-          {forwardingRules.map((rule, i) => (
-            <PanelSectionRow key={i}>
-              <pre style={{ margin: 0, fontSize: "11px", color: "#ccc", fontFamily: "monospace", whiteSpace: "pre-wrap" }}>{rule.raw}</pre>
-            </PanelSectionRow>
-          ))}
+          <PanelSectionRow>
+            <div style={{ backgroundColor: "rgba(0,0,0,0.3)", borderRadius: "6px", overflow: "hidden" }}>
+              {forwardingRules.map((rule, i) => (
+                <pre key={i} style={{ margin: 0, padding: "8px 12px", fontSize: "11px", color: "#ccc", fontFamily: "monospace", whiteSpace: "pre-wrap", borderBottom: i < forwardingRules.length - 1 ? "1px solid rgba(255,255,255,0.08)" : "none" }}>{rule.raw}</pre>
+              ))}
+            </div>
+          </PanelSectionRow>
         </PanelSection>
       )}
 
@@ -577,6 +815,11 @@ function Content() {
       <PanelSection title="Expose">
         <PanelSectionRow>
           <ButtonItem layout="below" disabled={actionLoading || !isConnected} onClick={showExposeModal}>Expose Local Port</ButtonItem>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <p style={{ margin: 0, fontSize: "11px", color: "#888", fontStyle: "italic" }}>
+            To use this option, firstly enable &quot;Enable Peer Expose&quot; and add the group in which your Steam Deck is.
+          </p>
         </PanelSectionRow>
       </PanelSection>
 
@@ -591,16 +834,33 @@ function Content() {
         <PanelSectionRow>
           <TextField label="Setup Key" description="Optional: pre-authentication key" value={setupKey} disabled={actionLoading} onChange={(e) => handleSaveSetupKey(e.target.value)} />
         </PanelSectionRow>
-        <PanelSectionRow>
-          <ToggleField label="Block Inbound" description="Block all inbound connections for extra security" checked={blockInbound} onChange={(val) => { setBlockInbound(val); localStorage.setItem("netbird_block_inbound", String(val)); }} />
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <TextField label="NetBird Binary Path" description={binaryPathResolved ? `Resolved: ${binaryPathResolved}` : "Leave empty for auto-detect"} value={binaryPath} disabled={actionLoading} onChange={(e) => setBinaryPathState(e.target.value)} />
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <ButtonItem layout="below" disabled={actionLoading} onClick={() => handleSaveBinaryPath(binaryPath)}>Save Binary Path</ButtonItem>
-        </PanelSectionRow>
       </PanelSection>
+
+      {/* ── Settings ── */}
+      {settings && (
+        <PanelSection title="Settings">
+          {settings.error || !cfg || Object.keys(cfg).length === 0 ? (
+            <PanelSectionRow>
+              <p style={{ margin: 0, fontSize: "12px", color: "#ff9800" }}>Log in first to manage settings.</p>
+            </PanelSectionRow>
+          ) : (
+            TOGGLE_SETTINGS.map((s) => {
+              const managedByMdm = s.mdm ? ((cfg.mDMManagedFields || []).includes(s.mdm)) : false;
+              return (
+                <PanelSectionRow key={s.key}>
+                  <ToggleField
+                    label={s.label}
+                    description={managedByMdm ? `${s.desc} — Managed by MDM` : s.desc}
+                    checked={Boolean(cfg[s.key])}
+                    disabled={actionLoading || managedByMdm}
+                    onChange={(v) => handleSettingToggle(s, v)}
+                  />
+                </PanelSectionRow>
+              );
+            })
+          )}
+        </PanelSection>
+      )}
 
       {/* ── Actions ── */}
       <PanelSection title="Actions">
@@ -610,7 +870,9 @@ function Content() {
           </PanelSectionRow>
         )}
         <PanelSectionRow>
-          <ButtonItem layout="below" disabled={actionLoading} onClick={async () => { setActionLoading(true); await fetchStatus(); setActionLoading(false); }}>Refresh Status</ButtonItem>
+          <ButtonItem layout="below" disabled={refreshing} onClick={handleRefresh}>
+            {refreshing ? "Refreshing…" : "Refresh Status"}
+          </ButtonItem>
         </PanelSectionRow>
         <PanelSectionRow>
           <ButtonItem layout="below" disabled={actionLoading} onClick={handleDeregister}>Deregister Peer</ButtonItem>
@@ -620,15 +882,17 @@ function Content() {
       {/* ── About ── */}
       <PanelSection title="About">
         <PanelSectionRow>
-          <div style={{ padding: "12px", backgroundColor: "rgba(0,0,0,0.4)", borderRadius: "8px" }}>
-            <p style={{ margin: 0, fontSize: "12px", color: "#888", fontStyle: "italic" }}>
-              NetBird v{statusInfo?.version || "?"} &middot; {profiles.current}
-            </p>
-            <p style={{ margin: "6px 0 0 0", fontSize: "10px", color: "#666", fontStyle: "italic" }}>
-              NetBird name and logo are trademarks of NetBird.io
-            </p>
-          </div>
-        </PanelSectionRow>
+          <CardFocusable style={{ width: "100%" }}>
+            <div style={{ padding: "12px", backgroundColor: "rgba(0,0,0,0.4)", borderRadius: "8px" }}>
+              <p style={{ margin: 0, fontSize: "12px", color: "#888", fontStyle: "italic" }}>
+                NetBird v{statusInfo?.version || "?"} &middot; {profiles.current}
+              </p>
+              <p style={{ margin: "6px 0 0 0", fontSize: "10px", color: "#666", fontStyle: "italic" }}>
+                NetBird name and logo are trademarks of NetBird.io
+              </p>
+              </div>
+            </CardFocusable>
+          </PanelSectionRow>
       </PanelSection>
     </>
   );
