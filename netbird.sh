@@ -85,8 +85,8 @@ _setup_path_integration() {
 
 _install_service() {
     local bin_path="$1"
-    echo "Installing systemd service via netbird service install..."
-    if ! sudo "$bin_path" service install; then
+    echo "Installing systemd service via netbird service install (JSON socket enabled)..."
+    if ! sudo "$bin_path" service install --enable-json-socket; then
         echo "Warning: netbird service install failed, trying direct service setup..." >&2
         local service_path="/etc/systemd/system/netbird.service"
         sudo bash -c "cat << EOFSVC > $service_path
@@ -109,6 +109,8 @@ EOFSVC
 "
         sudo systemctl daemon-reload
         sudo systemctl enable netbird
+    else
+        sudo "$bin_path" service reconfigure --enable-json-socket 2>/dev/null || true
     fi
     sudo "$bin_path" service start 2>/dev/null || sudo systemctl start netbird 2>/dev/null || true
 }
@@ -134,6 +136,7 @@ install_netbird() {
     echo "Deployment finalized successfully."
     echo "Binary path: $NETBIRD_BIN"
     echo "Service state: $(systemctl is-active netbird 2>/dev/null || echo 'unknown')"
+    echo "JSON socket: /var/run/netbird-http.sock"
     echo "To use netbird in this terminal, run:"
     echo "  source $PROFILE_SCRIPT"
 }
@@ -225,7 +228,8 @@ update_netbird() {
     rm -rf "$temp_dir"
     _setup_path_integration "$bin_path"
     if [ -x "$bin_path" ]; then
-        sudo "$bin_path" service install 2>/dev/null || true
+        sudo "$bin_path" service reconfigure --enable-json-socket 2>/dev/null || \
+            sudo "$bin_path" service install --enable-json-socket 2>/dev/null || true
         sudo "$bin_path" service restart 2>/dev/null || sudo systemctl restart netbird 2>/dev/null || true
     fi
     sleep 2
@@ -233,6 +237,7 @@ update_netbird() {
     echo "NetBird updated to v$version."
     echo "Binary: $bin_path"
     echo "Service: $(systemctl is-active netbird 2>/dev/null || echo 'unknown')"
+    echo "JSON socket: /var/run/netbird-http.sock"
     echo "To use netbird in this terminal, run:"
     echo "  source $PROFILE_SCRIPT"
 }

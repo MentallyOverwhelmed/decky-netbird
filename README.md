@@ -33,7 +33,7 @@ Manage [NetBird](https://netbird.io) VPN on your Steam Deck directly from the Qu
 ## Prerequisites
 
 - [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader) installed on your Steam Deck
-- **NetBird agent** installed on your system (see **Install NetBird** below)
+- **NetBird agent v0.75 or newer** installed on your system (see **Install NetBird** below)
 
 ---
 
@@ -42,13 +42,15 @@ Manage [NetBird](https://netbird.io) VPN on your Steam Deck directly from the Qu
 Open **Konsole** (terminal emulator) on your Steam Deck in Gaming Mode, or a terminal in Desktop Mode, and run:
 
 ```bash
-curl -L -o netbird.sh https://raw.githubusercontent.com/MentallyOverwhelmed/decky-netbird/v1.0.1/netbird.sh
+curl -L -o netbird.sh https://raw.githubusercontent.com/MentallyOverwhelmed/decky-netbird/v1.1.0/netbird.sh
 bash netbird.sh
 ```
 
 Then select option **1) Install NetBird** from the menu. The script will prompt for your sudo password when needed.
 
 > **Note:** NetBird runs as a system service. The script installs it, configures systemd, and starts the daemon automatically. You only need to do this once.
+
+> **Note:** This plugin talks to the NetBird daemon over its JSON socket (`/var/run/netbird-http.sock`). The installer enables it automatically (requires NetBird v0.75+). If you installed NetBird manually, run `sudo netbird service reconfigure --enable-json-socket` to enable it.
 
 ---
 
@@ -109,7 +111,6 @@ pnpm run typecheck   # TypeScript type check
 - If the plugin keeps loading indefinitely, restart your Steam Deck and verify your management URL and setup key.
 - If `netbird` is not found in the terminal after installing, run `source /etc/profile.d/netbird.sh` or open a new terminal.
 - If the service fails to start, check `systemctl status netbird` for details.
-- If installing on SteamOS, use the release URL above (not `main` branch) to avoid cached versions.
 
 ## License
 

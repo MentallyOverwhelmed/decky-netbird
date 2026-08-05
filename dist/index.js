@@ -16,6 +16,7 @@ if (api._version != API_VERSION) {
     console.warn(`[@decky/api] Requested API version ${API_VERSION} but the running loader only supports version ${api._version}. Some features may not work.`);
 }
 const callable = api.callable;
+const useQuickAccessVisible = api.useQuickAccessVisible;
 const definePlugin = (fn) => {
     return (...args) => {
         return fn(...args);
@@ -39,6 +40,11 @@ const connect = callable("connect");
 const disconnect = callable("disconnect");
 const deregister = callable("deregister");
 const saveManagementUrl = callable("set_management_url");
+const getSettings = callable("get_settings");
+const applySettings = callable("set_settings");
+const renameProfile = callable("rename_profile");
+const requestSessionRenewal = callable("request_session_renewal");
+const waitSessionRenewal = callable("wait_session_renewal");
 const pillStyle = (color) => ({
     display: "inline-block", padding: "2px 8px", borderRadius: "10px",
     fontSize: "11px", fontWeight: "bold", color: "#fff", backgroundColor: color,
@@ -46,16 +52,20 @@ const pillStyle = (color) => ({
 function Pill({ label, color }) {
     return SP_JSX.jsx("span", { style: pillStyle(color), children: label });
 }
+function CardFocusable({ children, style }) {
+    // Steam's Focusable only becomes a gamepad focus stop when `focusable` is
+    // explicitly set (it defaults to not focusable when the card has no
+    // interactive children); the prop is missing from the published d.ts.
+    return (SP_JSX.jsx(DFL.Focusable, { ...{ focusable: true }, style: style, children: children }));
+}
 function LoadingSpinner() {
     return (SP_JSX.jsx("div", { style: { display: "flex", justifyContent: "center", padding: "20px 0" }, children: SP_JSX.jsx(DFL.Spinner, { width: 32, height: 32 }) }));
 }
 const INSTALL_INSTRUCTIONS = `# Install NetBird on SteamOS
 Run this in Konsole (Terminal):
-# 1. Make script executable
-chmod +x netbird.sh
-# 2. Run installer (select "Install NetBird" from the menu)
-sudo ./netbird.sh
-# 3. After installation completes, restart Decky Loader:
+# 1. Run installer (select "Install NetBird" from the menu)
+bash netbird.sh
+# 2. After installation completes, restart Decky Loader:
 #    - Open Decky Loader settings
 #    - Click "Restart Decky Loader"`;
 function SetupGuide() {
@@ -76,7 +86,59 @@ function AuthModal({ url, onClose }) {
         }, 2000);
         return () => clearInterval(interval);
     }, [onClose]);
-    return (SP_JSX.jsx(DFL.ConfirmModal, { strTitle: "Authenticate with NetBird", strDescription: SP_JSX.jsxs("div", { style: { textAlign: "center" }, children: [SP_JSX.jsx("p", { style: { margin: "0 0 16px 0", color: "#ccc" }, children: "Open this URL in your browser to authenticate:" }), SP_JSX.jsx("img", { src: `https://api.qrserver.com/v1/create-qr-code/?size=256x256&data=${encodeURIComponent(url)}`, alt: "QR Code", style: { width: "256px", height: "256px", margin: "0 auto 8px auto", display: "block" } }), showUrl && SP_JSX.jsx("div", { style: { backgroundColor: "rgba(0,0,0,0.6)", padding: "12px", borderRadius: "4px", wordBreak: "break-all", fontSize: "12px", color: "#4FC3F7", fontFamily: "monospace", textAlign: "left" }, children: url })] }), strOKButtonText: showUrl ? "Hide URL" : "Show URL", onOK: () => setShowUrl(!showUrl) }));
+    return (SP_JSX.jsxs(DFL.ModalRoot, { closeModal: onClose, onEscKeypress: onClose, children: [SP_JSX.jsxs("div", { style: { textAlign: "center" }, children: [SP_JSX.jsx("p", { style: { margin: "0 0 12px 0", fontSize: "18px", fontWeight: "bold" }, children: "Authenticate with NetBird" }), SP_JSX.jsx("p", { style: { margin: "0 0 12px 0", color: "#ccc" }, children: "Scan the QR code to authenticate. This window closes automatically once connected." }), SP_JSX.jsx("img", { src: `https://api.qrserver.com/v1/create-qr-code/?size=192x192&data=${encodeURIComponent(url)}`, alt: "QR Code", style: { width: "192px", height: "192px", margin: "0 auto 12px auto", display: "block" } }), showUrl && (SP_JSX.jsx("div", { style: { backgroundColor: "rgba(0,0,0,0.6)", padding: "12px", borderRadius: "4px", wordBreak: "break-all", fontSize: "12px", color: "#4FC3F7", fontFamily: "monospace", textAlign: "left" }, children: url }))] }), SP_JSX.jsxs("div", { style: { display: "flex", justifyContent: "flex-end", gap: "8px", marginTop: "16px" }, children: [SP_JSX.jsx(DFL.DialogButton, { onClick: () => setShowUrl((v) => !v), children: showUrl ? "Hide URL" : "Show URL" }), SP_JSX.jsx(DFL.DialogButtonPrimary, { onClick: onClose, children: "Close" })] })] }));
+}
+function formatDuration(ms) {
+    const mins = Math.max(0, Math.floor(ms / 60000));
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    return h > 0 ? `${h}h ${m}m` : `${m}m`;
+}
+function RenewSessionModal({ url, userCode, deviceCode, onClose, onRenewed }) {
+    const [result, setResult] = SP_REACT.useState(null);
+    const [showUrl, setShowUrl] = SP_REACT.useState(false);
+    SP_REACT.useEffect(() => {
+        let cancelled = false;
+        (async () => {
+            try {
+                const r = await waitSessionRenewal(userCode, deviceCode);
+                if (!cancelled)
+                    setResult(r.success ? "Session renewed!" : (r.stderr || "Error renewing session"));
+            }
+            catch {
+                if (!cancelled)
+                    setResult("Error renewing session");
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [userCode, deviceCode]);
+    const handleClose = () => {
+        onClose();
+        onRenewed();
+    };
+    return (SP_JSX.jsxs(DFL.ModalRoot, { closeModal: handleClose, onEscKeypress: handleClose, children: [SP_JSX.jsxs("div", { style: { textAlign: "center" }, children: [SP_JSX.jsx("p", { style: { margin: "0 0 12px 0", fontSize: "18px", fontWeight: "bold" }, children: "Extend Session" }), result ? (SP_JSX.jsx("p", { style: { color: result.startsWith("Error") || result.startsWith("HTTP") ? "#f44336" : "#4CAF50", fontWeight: "bold" }, children: result })) : (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx("p", { style: { margin: "0 0 8px 0", color: "#ccc" }, children: "Scan the QR code to extend your session." }), SP_JSX.jsx("img", { src: `https://api.qrserver.com/v1/create-qr-code/?size=192x192&data=${encodeURIComponent(url)}`, alt: "QR Code", style: { width: "192px", height: "192px", margin: "0 auto 8px auto", display: "block" } }), showUrl && (SP_JSX.jsx("div", { style: { backgroundColor: "rgba(0,0,0,0.6)", padding: "12px", borderRadius: "4px", wordBreak: "break-all", fontSize: "12px", color: "#4FC3F7", fontFamily: "monospace", textAlign: "left" }, children: url }))] }))] }), SP_JSX.jsxs("div", { style: { display: "flex", justifyContent: "flex-end", gap: "8px", marginTop: "16px" }, children: [!result && (SP_JSX.jsx(DFL.DialogButton, { onClick: () => setShowUrl((v) => !v), children: showUrl ? "Hide URL" : "Show URL" })), SP_JSX.jsx(DFL.DialogButtonPrimary, { onClick: handleClose, children: "Close" })] })] }));
+}
+function RenameProfileModal({ current, onClose }) {
+    const [name, setName] = SP_REACT.useState(current || "");
+    const [working, setWorking] = SP_REACT.useState(false);
+    const [result, setResult] = SP_REACT.useState(null);
+    return (SP_JSX.jsx(DFL.ConfirmModal, { closeModal: working ? undefined : onClose, strTitle: "Rename Profile", strDescription: SP_JSX.jsx("div", { children: result ? (SP_JSX.jsx("p", { style: { color: result.startsWith("Error") || result.startsWith("HTTP") ? "#f44336" : "#4CAF50", fontWeight: "bold" }, children: result })) : (SP_JSX.jsx(DFL.TextField, { label: "New Profile Name", value: name, disabled: working, onChange: (e) => setName(e.target.value) })) }), strOKButtonText: result ? "Close" : "Rename", onOK: async () => {
+            if (result) {
+                onClose();
+                return;
+            }
+            if (!name.trim())
+                return;
+            setWorking(true);
+            try {
+                const r = await renameProfile(name.trim());
+                setResult(r.success ? `Profile renamed to "${name.trim()}"` : (r.stderr || "Error renaming profile"));
+            }
+            catch {
+                setResult("Error renaming profile");
+            }
+            setWorking(false);
+        } }));
 }
 const PROTOCOLS = [
     { data: 0, label: "tcp" },
@@ -156,6 +218,17 @@ function RemoveProfileModal({ profiles, current, onClose }) {
             setWorking(false);
         } }));
 }
+const TOGGLE_SETTINGS = [
+    { key: "disableAutoConnect", sendKey: "disableAutoConnect", mdm: "disableAutoConnect", label: "Disable Auto-Connect", desc: "Do not auto-connect when the daemon starts" },
+    { key: "blockInbound", sendKey: "blockInbound", mdm: "blockInbound", label: "Block Inbound", desc: "Block all inbound connections for extra security" },
+    { key: "blockLanAccess", sendKey: "blockLanAccess", label: "Block LAN Access", desc: "Block access to LAN devices" },
+    { key: "disableIpv6", sendKey: "disableIpv6", label: "Disable IPv6", desc: "Disable IPv6 on the WireGuard interface" },
+    { key: "disableDns", sendKey: "disableDns", label: "Disable DNS", desc: "Do not manage DNS resolution" },
+    { key: "disableClientRoutes", sendKey: "disableClientRoutes", mdm: "disableClientRoutes", label: "Disable Client Routes", desc: "Ignore routes pushed by the management server" },
+    { key: "disableServerRoutes", sendKey: "disableServerRoutes", mdm: "disableServerRoutes", label: "Disable Server Routes", desc: "Do not advertise routes to other peers" },
+    { key: "rosenpassEnabled", sendKey: "rosenpassEnabled", mdm: "rosenpassEnabled", label: "Rosenpass", desc: "Enable post-quantum handshake encryption" },
+    { key: "rosenpassPermissive", sendKey: "rosenpassPermissive", mdm: "rosenpassPermissive", label: "Rosenpass Permissive", desc: "Allow peers without rosenpass support" },
+];
 function Content() {
     const [systemInfo, setSystemInfo] = SP_REACT.useState(null);
     const [statusInfo, setStatusInfo] = SP_REACT.useState(null);
@@ -166,17 +239,17 @@ function Content() {
     const [loading, setLoading] = SP_REACT.useState(true);
     const [actionLoading, setActionLoading] = SP_REACT.useState(false);
     const [managementUrl, setManagementUrl] = SP_REACT.useState("");
-    const [blockInbound, setBlockInbound] = SP_REACT.useState(() => {
-        if (typeof window !== "undefined")
-            return localStorage.getItem("netbird_block_inbound") === "true";
-        return false;
-    });
     const [setupKey, setSetupKey] = SP_REACT.useState(() => {
         if (typeof window !== "undefined")
             return localStorage.getItem("netbird_setup_key") || "";
         return "";
     });
+    const [settings, setSettings] = SP_REACT.useState(null);
+    const [cfg, setCfg] = SP_REACT.useState(null);
+    const [notice, setNotice] = SP_REACT.useState("");
+    const [refreshing, setRefreshing] = SP_REACT.useState(false);
     const pollRef = SP_REACT.useRef(null);
+    const quickAccessVisible = useQuickAccessVisible();
     const fetchSystemInfo = SP_REACT.useCallback(async () => {
         setLoading(true);
         try {
@@ -207,9 +280,13 @@ function Content() {
     }, []);
     const fetchManagementUrl = SP_REACT.useCallback(async () => {
         try {
-            const r = await getManagementUrl();
-            if (r)
-                setManagementUrl(r);
+            const [url, s] = await Promise.all([getManagementUrl(), getSettings()]);
+            if (url)
+                setManagementUrl(url);
+            if (s) {
+                setSettings(s);
+                setCfg(s.config || {});
+            }
         }
         catch (err) {
             console.error("Failed to get management URL:", err);
@@ -225,11 +302,15 @@ function Content() {
     SP_REACT.useEffect(() => {
         if (pollRef.current)
             clearInterval(pollRef.current);
-        if (systemInfo?.netbird_installed)
+        if (systemInfo?.netbird_installed && quickAccessVisible)
             pollRef.current = setInterval(fetchStatus, 5000);
         return () => { if (pollRef.current)
             clearInterval(pollRef.current); };
-    }, [systemInfo?.netbird_installed, fetchStatus]);
+    }, [systemInfo?.netbird_installed, fetchStatus, quickAccessVisible]);
+    SP_REACT.useEffect(() => {
+        if (quickAccessVisible && systemInfo?.netbird_installed)
+            fetchStatus();
+    }, [quickAccessVisible, systemInfo?.netbird_installed, fetchStatus]);
     const showAuthModal = (url) => {
         let closeModal = () => { };
         const C = () => SP_JSX.jsx(AuthModal, { url: url, onClose: closeModal });
@@ -240,7 +321,7 @@ function Content() {
         setActionLoading(true);
         try {
             if (value) {
-                const result = await connect(managementUrl, setupKey || undefined, blockInbound);
+                const result = await connect(managementUrl, setupKey || undefined);
                 if (result.auth_url)
                     showAuthModal(result.auth_url);
             }
@@ -256,7 +337,7 @@ function Content() {
         finally {
             setActionLoading(false);
         }
-    }, [managementUrl, setupKey, blockInbound, fetchStatus]);
+    }, [managementUrl, setupKey, fetchStatus]);
     const handleNetworkToggle = SP_REACT.useCallback(async (name, value) => {
         setActionLoading(true);
         try {
@@ -297,21 +378,70 @@ function Content() {
     const handleSaveUrl = SP_REACT.useCallback(async (url) => {
         setActionLoading(true);
         try {
-            await saveManagementUrl(url);
+            const r = await saveManagementUrl(url);
             setManagementUrl(url);
             localStorage.setItem("netbird_mgmt_url", url);
+            setNotice(r.success ? (r.stdout || "Management URL saved") : (r.stderr || "Failed to save management URL"));
         }
         catch (err) {
             console.error("Save URL failed:", err);
+            setNotice("Failed to save management URL");
         }
         finally {
             setActionLoading(false);
         }
     }, []);
+    const handleSettingToggle = SP_REACT.useCallback(async (s, value) => {
+        setCfg((prev) => ({ ...(prev || {}), [s.key]: value }));
+        try {
+            const r = await applySettings({ [s.sendKey]: value });
+            setNotice(r.success ? (r.stdout || "Settings applied") : (r.stderr || "Failed to apply setting"));
+        }
+        catch (err) {
+            console.error("Apply setting failed:", err);
+            setNotice("Failed to apply setting");
+        }
+        const fresh = await getSettings().catch(() => null);
+        if (fresh)
+            setCfg(fresh.config || {});
+    }, []);
+    const handleRenewSession = SP_REACT.useCallback(async () => {
+        setActionLoading(true);
+        try {
+            const r = await requestSessionRenewal();
+            if (!r.success || !r.auth_url) {
+                setNotice(r.stderr || "Cannot start session renewal");
+                return;
+            }
+            let closeModal = () => { };
+            const C = () => (SP_JSX.jsx(RenewSessionModal, { url: r.auth_url || "", userCode: r.user_code || "", deviceCode: r.device_code || "", onClose: closeModal, onRenewed: fetchStatus }));
+            const modal = DFL.showModal(SP_JSX.jsx(C, {}), window, { strTitle: "Extend Session", popupWidth: 420, popupHeight: 520 });
+            closeModal = modal.Close;
+        }
+        catch (err) {
+            console.error("Renew failed:", err);
+            setNotice("Failed to start session renewal");
+        }
+        finally {
+            setActionLoading(false);
+        }
+    }, [fetchStatus]);
     const handleSaveSetupKey = SP_REACT.useCallback((key) => {
         setSetupKey(key);
         localStorage.setItem("netbird_setup_key", key);
     }, []);
+    const handleRefresh = SP_REACT.useCallback(async () => {
+        setRefreshing(true);
+        try {
+            await Promise.all([fetchStatus(), fetchManagementUrl()]);
+        }
+        catch (err) {
+            console.error("Refresh failed:", err);
+        }
+        finally {
+            setRefreshing(false);
+        }
+    }, [fetchStatus, fetchManagementUrl]);
     const handleDeregister = SP_REACT.useCallback(async () => {
         setActionLoading(true);
         try {
@@ -344,6 +474,12 @@ function Content() {
         const modal = DFL.showModal(SP_JSX.jsx(C, {}), window, { strTitle: "Remove Profile", popupWidth: 400, popupHeight: 350 });
         closeModal = modal.Close;
     }, [profiles]);
+    const showRenameProfileModal = SP_REACT.useCallback(() => {
+        let closeModal = () => { };
+        const C = () => SP_JSX.jsx(RenameProfileModal, { current: profiles.current, onClose: closeModal });
+        const modal = DFL.showModal(SP_JSX.jsx(C, {}), window, { strTitle: "Rename Profile", popupWidth: 400, popupHeight: 300 });
+        closeModal = modal.Close;
+    }, [profiles.current]);
     if (loading) {
         return SP_JSX.jsx(DFL.PanelSection, { title: "NetBird VPN", children: SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(LoadingSpinner, {}) }) });
     }
@@ -352,11 +488,24 @@ function Content() {
     }
     const needsLogin = statusInfo?.daemon_status === "NeedsLogin";
     const isConnected = statusInfo?.connected || false;
+    const authFailed = statusInfo?.daemon_status === "LoginFailed";
+    const connecting = statusInfo?.daemon_status === "Connecting";
+    const displayLabel = isConnected ? "Connected" : needsLogin ? "Needs Login" : authFailed ? "Auth Failed" : connecting ? "Connecting" : "Disconnected";
+    const displayColor = isConnected ? "#4CAF50" : needsLogin ? "#ff9800" : authFailed ? "#f44336" : connecting ? "#4FC3F7" : "#f44336";
     const profileOptions = profiles.profiles.map((p, i) => ({ data: i, label: p }));
-    return (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSection, { title: "NetBird VPN", children: SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { padding: "16px", backgroundColor: "rgba(0,0,0,0.4)", borderRadius: "8px" }, children: [SP_JSX.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between" }, children: [SP_JSX.jsxs("div", { children: [SP_JSX.jsx("p", { style: { margin: 0, fontSize: "18px", fontWeight: "bold", color: isConnected ? "#4CAF50" : needsLogin ? "#ff9800" : "#f44336" }, children: isConnected ? "Connected" : needsLogin ? "Needs Login" : "Disconnected" }), profiles.current && SP_JSX.jsxs("p", { style: { margin: "2px 0 0 0", fontSize: "11px", color: "#888" }, children: ["Profile: ", profiles.current] }), statusInfo?.netbird_ip && SP_JSX.jsx("p", { style: { margin: "2px 0 0 0", fontSize: "12px", color: "#aaa" }, children: statusInfo.netbird_ip })] }), SP_JSX.jsx(Pill, { color: isConnected ? "#4CAF50" : needsLogin ? "#ff9800" : "#666", label: isConnected ? "Active" : needsLogin ? "Pending" : "Offline" })] }), statusInfo?.peers && (SP_JSX.jsx("div", { style: { marginTop: "8px", display: "flex", gap: "12px", fontSize: "12px", color: "#888" }, children: SP_JSX.jsxs("span", { children: ["Peers: ", SP_JSX.jsxs("strong", { style: { color: "#ccc" }, children: [statusInfo.peers.connected, "/", statusInfo.peers.total] })] }) }))] }) }) }), SP_JSX.jsx(DFL.PanelSection, { title: "Connection", children: SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "VPN Toggle", description: isConnected ? "NetBird is active" : needsLogin ? "Authentication required" : "NetBird is off", checked: isConnected, disabled: actionLoading, onChange: handleToggleConnection }) }) }), SP_JSX.jsxs(DFL.PanelSection, { title: "Profile", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.DropdownItem, { label: "Active Profile", menuLabel: "Switch Profile", selectedOption: profileOptions.find((o) => o.label === profiles.current)?.data ?? 0, disabled: actionLoading || profileOptions.length === 0, rgOptions: profileOptions, onChange: (opt) => handleProfileSwitch(String(opt.label)) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: actionLoading, onClick: showAddProfileModal, children: "Add Profile" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: actionLoading || profiles.profiles.length <= 1, onClick: showRemoveProfileModal, children: "Remove Profile" }) })] }), SP_JSX.jsx(DFL.PanelSection, { title: `Peers (${peers.length})`, children: peers.length === 0 ? (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("p", { style: { margin: 0, fontSize: "12px", color: "#888", fontStyle: "italic" }, children: "No peers connected" }) })) : (peers.map((peer, i) => (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 12px", backgroundColor: "rgba(0,0,0,0.3)", borderRadius: "6px" }, children: [SP_JSX.jsxs("div", { children: [SP_JSX.jsx("p", { style: { margin: 0, fontSize: "13px", color: "#ddd" }, children: peer.fqdn || peer.ip }), SP_JSX.jsxs("div", { style: { display: "flex", gap: "6px", marginTop: "2px" }, children: [peer.latency && SP_JSX.jsx("span", { style: { fontSize: "11px", color: "#888" }, children: peer.latency }), peer.connection_type && (SP_JSX.jsx("span", { style: { fontSize: "11px", color: peer.connection_type === "P2P" ? "#4FC3F7" : "#ff9800" }, children: peer.connection_type }))] })] }), SP_JSX.jsx(Pill, { color: peer.status === "connected" ? "#4CAF50" : peer.status === "idle" ? "#ff9800" : "#666", label: peer.status })] }) }, i)))) }), networks.length > 0 && (SP_JSX.jsx(DFL.PanelSection, { title: "Network Resources", children: networks.map((net, i) => {
+    const sessionMs = statusInfo?.session_expires_at ? new Date(statusInfo.session_expires_at).getTime() - Date.now() : 0;
+    const sessionValid = isConnected && sessionMs > 0;
+    const sessionWarning = sessionValid && sessionMs < 5 * 60 * 1000;
+    if (!isConnected && (needsLogin || authFailed)) {
+        return (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSection, { title: "NetBird VPN", children: SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { padding: "16px", backgroundColor: "rgba(0,0,0,0.4)", borderRadius: "8px" }, children: [SP_JSX.jsx("p", { style: { margin: 0, fontSize: "18px", fontWeight: "bold", color: displayColor }, children: displayLabel }), SP_JSX.jsx("p", { style: { margin: "4px 0 0 0", fontSize: "12px", color: "#aaa" }, children: authFailed ? "Authentication failed. Check your credentials and try again." : "Log in to connect to your NetBird network." })] }) }) }), SP_JSX.jsxs(DFL.PanelSection, { title: "Login", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: "Management URL", description: "NetBird management server address", value: managementUrl, disabled: actionLoading, onChange: (e) => setManagementUrl(e.target.value) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: "Setup Key", description: "Optional: pre-authentication key", value: setupKey, disabled: actionLoading, onChange: (e) => handleSaveSetupKey(e.target.value) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: actionLoading, onClick: () => handleToggleConnection(true), children: "Authenticate & Connect" }) }), notice && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("p", { style: { margin: 0, fontSize: "11px", color: notice.startsWith("Failed") || notice.startsWith("HTTP") ? "#f44336" : "#4CAF50" }, children: notice }) }))] })] }));
+    }
+    return (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsxs(DFL.PanelSection, { title: "NetBird VPN", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(CardFocusable, { style: { width: "100%" }, children: SP_JSX.jsxs("div", { style: { padding: "16px", backgroundColor: "rgba(0,0,0,0.4)", borderRadius: "8px" }, children: [SP_JSX.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between" }, children: [SP_JSX.jsxs("div", { children: [SP_JSX.jsx("p", { style: { margin: 0, fontSize: "18px", fontWeight: "bold", color: displayColor }, children: displayLabel }), profiles.current && SP_JSX.jsxs("p", { style: { margin: "2px 0 0 0", fontSize: "11px", color: "#888" }, children: ["Profile: ", profiles.current] }), statusInfo?.netbird_ip && SP_JSX.jsx("p", { style: { margin: "2px 0 0 0", fontSize: "12px", color: "#aaa" }, children: statusInfo.netbird_ip })] }), SP_JSX.jsx(Pill, { color: isConnected ? "#4CAF50" : needsLogin ? "#ff9800" : authFailed ? "#f44336" : connecting ? "#4FC3F7" : "#666", label: isConnected ? "Active" : needsLogin ? "Pending" : authFailed ? "Failed" : connecting ? "Connecting" : "Offline" })] }), statusInfo?.peers && (SP_JSX.jsx("div", { style: { marginTop: "8px", display: "flex", gap: "12px", fontSize: "12px", color: "#888" }, children: SP_JSX.jsxs("span", { children: ["Peers: ", SP_JSX.jsxs("strong", { style: { color: "#ccc" }, children: [statusInfo.peers.connected, "/", statusInfo.peers.total] })] }) })), sessionValid && (SP_JSX.jsxs("div", { style: { marginTop: "8px", fontSize: "12px", color: sessionWarning ? "#ff9800" : "#888" }, children: [sessionWarning && SP_JSX.jsx("span", { style: { fontWeight: "bold", marginRight: "6px" }, children: "Session expires soon!" }), SP_JSX.jsxs("span", { children: ["Session expires in ", SP_JSX.jsx("strong", { style: { color: sessionWarning ? "#ff9800" : "#ccc" }, children: formatDuration(sessionMs) })] })] })), notice && (SP_JSX.jsx("div", { style: { marginTop: "8px", fontSize: "11px", color: notice.startsWith("Failed") || notice.startsWith("HTTP") ? "#f44336" : "#4CAF50" }, children: notice }))] }) }) }), sessionValid && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: actionLoading, onClick: handleRenewSession, children: sessionWarning ? "Extend Session Now" : "Extend Session" }) }))] }), SP_JSX.jsx(DFL.PanelSection, { title: "Connection", children: SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "VPN Toggle", description: isConnected ? "NetBird is active" : needsLogin ? "Authentication required" : authFailed ? "Authentication failed - retry" : "NetBird is off", checked: isConnected, disabled: actionLoading, onChange: handleToggleConnection }) }) }), SP_JSX.jsxs(DFL.PanelSection, { title: "Profile", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.DropdownItem, { label: "Active Profile", menuLabel: "Switch Profile", selectedOption: profileOptions.find((o) => o.label === profiles.current)?.data ?? 0, disabled: actionLoading || profileOptions.length === 0, rgOptions: profileOptions, onChange: (opt) => handleProfileSwitch(String(opt.label)) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: actionLoading, onClick: showAddProfileModal, children: "Add Profile" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: actionLoading || !profiles.current, onClick: showRenameProfileModal, children: "Rename Profile" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: actionLoading || profiles.profiles.length <= 1, onClick: showRemoveProfileModal, children: "Remove Profile" }) })] }), SP_JSX.jsx(DFL.PanelSection, { title: `Peers (${peers.length})`, children: peers.length === 0 ? (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("p", { style: { margin: 0, fontSize: "12px", color: "#888", fontStyle: "italic" }, children: "No peers connected" }) })) : (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(CardFocusable, { style: { width: "100%" }, children: SP_JSX.jsx("div", { style: { backgroundColor: "rgba(0,0,0,0.3)", borderRadius: "6px", overflow: "hidden" }, children: peers.map((peer, i) => (SP_JSX.jsxs("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 12px", borderBottom: i < peers.length - 1 ? "1px solid rgba(255,255,255,0.08)" : "none" }, children: [SP_JSX.jsxs("div", { children: [SP_JSX.jsx("p", { style: { margin: 0, fontSize: "13px", color: "#ddd" }, children: peer.fqdn || peer.ip }), SP_JSX.jsxs("div", { style: { display: "flex", gap: "6px", marginTop: "2px" }, children: [peer.latency && SP_JSX.jsx("span", { style: { fontSize: "11px", color: "#888" }, children: peer.latency }), peer.connection_type && (SP_JSX.jsx("span", { style: { fontSize: "11px", color: peer.connection_type === "P2P" ? "#4FC3F7" : "#ff9800" }, children: peer.connection_type }))] })] }), SP_JSX.jsx(Pill, { color: peer.status === "connected" ? "#4CAF50" : peer.status === "idle" ? "#ff9800" : peer.status === "connecting" ? "#4FC3F7" : "#f44336", label: peer.status })] }, i))) }) }) })) }), networks.length > 0 && (SP_JSX.jsx(DFL.PanelSection, { title: "Network Resources", children: networks.map((net, i) => {
                     const netConnected = net.status === "Connected";
                     return (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: net.name, description: net.network ? `${net.network} — ${netConnected ? "Connected" : "Disconnected"}` : netConnected ? "Connected" : "Disconnected", checked: netConnected, disabled: actionLoading, onChange: (val) => handleNetworkToggle(net.name, val) }) }, i));
-                }) })), forwardingRules.length > 0 && (SP_JSX.jsx(DFL.PanelSection, { title: "Port Forwarding", children: forwardingRules.map((rule, i) => (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("pre", { style: { margin: 0, fontSize: "11px", color: "#ccc", fontFamily: "monospace", whiteSpace: "pre-wrap" }, children: rule.raw }) }, i))) })), SP_JSX.jsx(DFL.PanelSection, { title: "Expose", children: SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: actionLoading || !isConnected, onClick: showExposeModal, children: "Expose Local Port" }) }) }), SP_JSX.jsxs(DFL.PanelSection, { title: "Configuration", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: "Management URL", description: "NetBird management server address", value: managementUrl, disabled: actionLoading, onChange: (e) => setManagementUrl(e.target.value) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: actionLoading, onClick: () => handleSaveUrl(managementUrl), children: "Save URL" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: "Setup Key", description: "Optional: pre-authentication key", value: setupKey, disabled: actionLoading, onChange: (e) => handleSaveSetupKey(e.target.value) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Block Inbound", description: "Block all inbound connections for extra security", checked: blockInbound, onChange: (val) => { setBlockInbound(val); localStorage.setItem("netbird_block_inbound", String(val)); } }) })] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Actions", children: [needsLogin && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: actionLoading, onClick: () => handleToggleConnection(true), children: "Authenticate & Connect" }) })), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: actionLoading, onClick: async () => { setActionLoading(true); await fetchStatus(); setActionLoading(false); }, children: "Refresh Status" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: actionLoading, onClick: handleDeregister, children: "Deregister Peer" }) })] }), SP_JSX.jsx(DFL.PanelSection, { title: "About", children: SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { padding: "12px", backgroundColor: "rgba(0,0,0,0.4)", borderRadius: "8px" }, children: [SP_JSX.jsxs("p", { style: { margin: 0, fontSize: "12px", color: "#888", fontStyle: "italic" }, children: ["NetBird v", statusInfo?.version || "?", " \u00B7 ", profiles.current] }), SP_JSX.jsx("p", { style: { margin: "6px 0 0 0", fontSize: "10px", color: "#666", fontStyle: "italic" }, children: "NetBird name and logo are trademarks of NetBird.io" })] }) }) })] }));
+                }) })), forwardingRules.length > 0 && (SP_JSX.jsx(DFL.PanelSection, { title: "Port Forwarding", children: SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { backgroundColor: "rgba(0,0,0,0.3)", borderRadius: "6px", overflow: "hidden" }, children: forwardingRules.map((rule, i) => (SP_JSX.jsx("pre", { style: { margin: 0, padding: "8px 12px", fontSize: "11px", color: "#ccc", fontFamily: "monospace", whiteSpace: "pre-wrap", borderBottom: i < forwardingRules.length - 1 ? "1px solid rgba(255,255,255,0.08)" : "none" }, children: rule.raw }, i))) }) }) })), SP_JSX.jsxs(DFL.PanelSection, { title: "Expose", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: actionLoading || !isConnected, onClick: showExposeModal, children: "Expose Local Port" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("p", { style: { margin: 0, fontSize: "11px", color: "#888", fontStyle: "italic" }, children: "To use this option, firstly enable \"Enable Peer Expose\" and add the group in which your Steam Deck is." }) })] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Configuration", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: "Management URL", description: "NetBird management server address", value: managementUrl, disabled: actionLoading, onChange: (e) => setManagementUrl(e.target.value) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: actionLoading, onClick: () => handleSaveUrl(managementUrl), children: "Save URL" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: "Setup Key", description: "Optional: pre-authentication key", value: setupKey, disabled: actionLoading, onChange: (e) => handleSaveSetupKey(e.target.value) }) })] }), settings && (SP_JSX.jsx(DFL.PanelSection, { title: "Settings", children: settings.error || !cfg || Object.keys(cfg).length === 0 ? (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("p", { style: { margin: 0, fontSize: "12px", color: "#ff9800" }, children: "Log in first to manage settings." }) })) : (TOGGLE_SETTINGS.map((s) => {
+                    const managedByMdm = s.mdm ? ((cfg.mDMManagedFields || []).includes(s.mdm)) : false;
+                    return (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: s.label, description: managedByMdm ? `${s.desc} — Managed by MDM` : s.desc, checked: Boolean(cfg[s.key]), disabled: actionLoading || managedByMdm, onChange: (v) => handleSettingToggle(s, v) }) }, s.key));
+                })) })), SP_JSX.jsxs(DFL.PanelSection, { title: "Actions", children: [needsLogin && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: actionLoading, onClick: () => handleToggleConnection(true), children: "Authenticate & Connect" }) })), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: refreshing, onClick: handleRefresh, children: refreshing ? "Refreshing…" : "Refresh Status" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: actionLoading, onClick: handleDeregister, children: "Deregister Peer" }) })] }), SP_JSX.jsx(DFL.PanelSection, { title: "About", children: SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(CardFocusable, { style: { width: "100%" }, children: SP_JSX.jsxs("div", { style: { padding: "12px", backgroundColor: "rgba(0,0,0,0.4)", borderRadius: "8px" }, children: [SP_JSX.jsxs("p", { style: { margin: 0, fontSize: "12px", color: "#888", fontStyle: "italic" }, children: ["NetBird v", statusInfo?.version || "?", " \u00B7 ", profiles.current] }), SP_JSX.jsx("p", { style: { margin: "6px 0 0 0", fontSize: "10px", color: "#666", fontStyle: "italic" }, children: "NetBird name and logo are trademarks of NetBird.io" })] }) }) }) })] }));
 }
 var index = definePlugin(() => {
     console.log("NetBird VPN plugin initializing");
